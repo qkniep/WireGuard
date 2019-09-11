@@ -382,6 +382,38 @@ static bool __must_check mix_dh(u8 chaining_key[NOISE_HASH_LEN],
 	return true;
 }
 
+static bool __must_check mix_pq_enc(u8 chaining_key[NOISE_HASH_LEN],
+				u8 key[NOISE_SYMMETRIC_KEY_LEN],
+				u8 pq_ciphertext[NOISE_PQ_CIPHERTEXT_LEN],
+				const u8 ephemeral_public[NOISE_PQ_PUBLIC_KEY_LEN])
+{
+	u8 shared_secret[NOISE_PQ_SS_LEN];
+
+	if (unlikely(!pqcrypto_kem_newhope512cca_enc(pq_ciphertext,
+					shared_secret, ephemeral_public)))
+		return false;
+	kdf(chaining_key, key, NULL, shared_secret, NOISE_HASH_LEN,
+	    NOISE_SYMMETRIC_KEY_LEN, 0, NOISE_PQ_SS_LEN, chaining_key);
+	memzero_explicit(shared_secret, NOISE_PQ_SS_LEN);
+	return true;
+}
+
+static bool __must_check mix_pq_dec(u8 chaining_key[NOISE_HASH_LEN],
+				u8 key[NOISE_SYMMETRIC_KEY_LEN],
+				u8 pq_ciphertext[NOISE_PQ_CIPHERTEXT_LEN],
+				const u8 ephemeral_private[NOISE_PQ_SECRET_KEY_LEN])
+{
+	u8 shared_secret[NOISE_PQ_SS_LEN];
+
+	if (unlikely(!pqcrypto_kem_newhope512cca_dec(shared_secret,
+					pq_ciphertext, ephemeral_private)))
+		return false;
+	kdf(chaining_key, key, NULL, shared_secret, NOISE_HASH_LEN,
+	    NOISE_SYMMETRIC_KEY_LEN, 0, NOISE_PQ_SS_LEN, chaining_key);
+	memzero_explicit(shared_secret, NOISE_PQ_SS_LEN);
+	return true;
+}
+
 static void mix_hash(u8 hash[NOISE_HASH_LEN], const u8 *src, size_t src_len)
 {
 	struct blake2s_state blake;
@@ -447,6 +479,32 @@ static void message_ephemeral(u8 ephemeral_dst[NOISE_PUBLIC_KEY_LEN],
 	    NOISE_PUBLIC_KEY_LEN, chaining_key);
 }
 
+static void message_ephemeral_pq(u8 ephemeral_dst[NOISE_PQ_PUBLIC_KEY_LEN],
+			      const u8 ephemeral_src[NOISE_PQ_PUBLIC_KEY_LEN],
+			      u8 chaining_key[NOISE_HASH_LEN],
+			      u8 hash[NOISE_HASH_LEN])
+{
+	if (ephemeral_dst != ephemeral_src)
+		memcpy(ephemeral_dst, ephemeral_src, NOISE_PQ_PUBLIC_KEY_LEN);
+	mix_hash(hash, ephemeral_src, NOISE_PQ_PUBLIC_KEY_LEN);
+	kdf(chaining_key, NULL, NULL, ephemeral_src, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_PUBLIC_KEY_LEN, chaining_key);
+}
+
+/*
+static void message_ciphertext_pq(u8 ciphertext_dst[NOISE_PQ_CIPHERTEXT_LEN],
+		const u8 ciphertext_src[NOISE_PQ_CIPHERTEXT_LEN],
+		u8 chaining_key[NOISE_HASH_LEN],
+		u8 hash[NOISE_HASH_LEN])
+{
+	if (ciphertext_dst != ciphertext_src)
+		memcpy(ciphertext_dst, ciphertext_src, NOISE_PQ_CIPHERTEXT_LEN);
+	mix_hash(hash, ciphertext_src, NOISE_PQ_CIPHERTEXT_LEN);
+	kdf(chaining_key, NULL, NULL, ciphertext_src, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_CIPHERTEXT_LEN, chaining_key);
+}
+*/
+
 static void tai64n_now(u8 output[NOISE_TIMESTAMP_LEN])
 {
 	struct timespec64 now;
@@ -499,6 +557,14 @@ wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 			  dst->unencrypted_ephemeral, handshake->chaining_key,
 			  handshake->hash);
 
+	/* eq */
+	if (pqcrypto_kem_newhope512cca_keypair(dst->unencrypted_ephemeral_pq,
+					handshake->ephemeral_private_pq))
+		goto out;
+	message_ephemeral_pq(dst->unencrypted_ephemeral_pq,
+			dst->unencrypted_ephemeral_pq, handshake->chaining_key,
+			handshake->hash);
+
 	/* es */
 	if (!mix_dh(handshake->chaining_key, key, handshake->ephemeral_private,
 		    handshake->remote_static))
@@ -546,6 +612,7 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	u8 hash[NOISE_HASH_LEN];
 	u8 s[NOISE_PUBLIC_KEY_LEN];
 	u8 e[NOISE_PUBLIC_KEY_LEN];
+	u8 eq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 t[NOISE_TIMESTAMP_LEN];
 
 	down_read(&wg->static_identity.lock);
@@ -556,6 +623,9 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 
 	/* e */
 	message_ephemeral(e, src->unencrypted_ephemeral, chaining_key, hash);
+
+	/* eq */
+	message_ephemeral_pq(eq, src->unencrypted_ephemeral_pq, chaining_key, hash);
 
 	/* es */
 	if (!mix_dh(chaining_key, key, wg->static_identity.static_private, e))
@@ -595,6 +665,7 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	/* Success! Copy everything to peer */
 	down_write(&handshake->lock);
 	memcpy(handshake->remote_ephemeral, e, NOISE_PUBLIC_KEY_LEN);
+	memcpy(handshake->remote_ephemeral_pq, eq, NOISE_PUBLIC_KEY_LEN);
 	memcpy(handshake->latest_timestamp, t, NOISE_TIMESTAMP_LEN);
 	memcpy(handshake->hash, hash, NOISE_HASH_LEN);
 	memcpy(handshake->chaining_key, chaining_key, NOISE_HASH_LEN);
@@ -643,6 +714,11 @@ bool wg_noise_handshake_create_response(struct message_handshake_response *dst,
 			  dst->unencrypted_ephemeral, handshake->chaining_key,
 			  handshake->hash);
 
+	/* eqeq */
+	if (!mix_pq_enc(handshake->chaining_key, NULL, dst->pq_ciphertext,
+		    handshake->remote_ephemeral_pq)) // TODO: send ciphertext
+		goto out;
+
 	/* ee */
 	if (!mix_dh(handshake->chaining_key, NULL, handshake->ephemeral_private,
 		    handshake->remote_ephemeral))
@@ -686,6 +762,7 @@ wg_noise_handshake_consume_response(struct message_handshake_response *src,
 	u8 chaining_key[NOISE_HASH_LEN];
 	u8 e[NOISE_PUBLIC_KEY_LEN];
 	u8 ephemeral_private[NOISE_PUBLIC_KEY_LEN];
+	u8 ephemeral_private_pq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 static_private[NOISE_PUBLIC_KEY_LEN];
 
 	down_read(&wg->static_identity.lock);
@@ -705,6 +782,8 @@ wg_noise_handshake_consume_response(struct message_handshake_response *src,
 	memcpy(chaining_key, handshake->chaining_key, NOISE_HASH_LEN);
 	memcpy(ephemeral_private, handshake->ephemeral_private,
 	       NOISE_PUBLIC_KEY_LEN);
+	memcpy(ephemeral_private_pq, handshake->ephemeral_private_pq,
+	       NOISE_PUBLIC_KEY_LEN);
 	up_read(&handshake->lock);
 
 	if (state != HANDSHAKE_CREATED_INITIATION)
@@ -712,6 +791,11 @@ wg_noise_handshake_consume_response(struct message_handshake_response *src,
 
 	/* e */
 	message_ephemeral(e, src->unencrypted_ephemeral, chaining_key, hash);
+
+	/* eqeq */
+	if (!mix_pq_dec(chaining_key, NULL, src->pq_ciphertext,
+		    ephemeral_private_pq))
+		goto fail;
 
 	/* ee */
 	if (!mix_dh(chaining_key, NULL, ephemeral_private, e))
@@ -754,6 +838,7 @@ out:
 	memzero_explicit(hash, NOISE_HASH_LEN);
 	memzero_explicit(chaining_key, NOISE_HASH_LEN);
 	memzero_explicit(ephemeral_private, NOISE_PUBLIC_KEY_LEN);
+	memzero_explicit(ephemeral_private_pq, NOISE_PUBLIC_KEY_LEN);
 	memzero_explicit(static_private, NOISE_PUBLIC_KEY_LEN);
 	up_read(&wg->static_identity.lock);
 	return ret_peer;
