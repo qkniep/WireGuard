@@ -19,6 +19,7 @@ static atomic64_t peer_counter = ATOMIC64_INIT(0);
 
 struct wg_peer *wg_peer_create(struct wg_device *wg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
+			       const u8 pq_public_key[NOISE_PQ_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN])
 {
 	struct wg_peer *peer;
@@ -34,7 +35,7 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	peer->device = wg;
 
 	if (!wg_noise_handshake_init(&peer->handshake, &wg->static_identity,
-				     public_key, preshared_key, peer))
+				     public_key, pq_public_key, preshared_key, peer))
 		goto err_1;
 	if (dst_cache_init(&peer->endpoint_cache, GFP_KERNEL))
 		goto err_1;

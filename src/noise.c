@@ -64,6 +64,7 @@ bool wg_noise_precompute_static_static(struct wg_peer *peer)
 bool wg_noise_handshake_init(struct noise_handshake *handshake,
 			   struct noise_static_identity *static_identity,
 			   const u8 peer_public_key[NOISE_PUBLIC_KEY_LEN],
+			   const u8 peer_pq_public_key[NOISE_PQ_PUBLIC_KEY_LEN],
 			   const u8 peer_preshared_key[NOISE_SYMMETRIC_KEY_LEN],
 			   struct wg_peer *peer)
 {
@@ -72,6 +73,8 @@ bool wg_noise_handshake_init(struct noise_handshake *handshake,
 	handshake->entry.type = INDEX_HASHTABLE_HANDSHAKE;
 	handshake->entry.peer = peer;
 	memcpy(handshake->remote_static, peer_public_key, NOISE_PUBLIC_KEY_LEN);
+	memcpy(handshake->remote_static_pq, peer_pq_public_key,
+	       NOISE_PQ_PUBLIC_KEY_LEN);
 	if (peer_preshared_key)
 		memcpy(handshake->preshared_key, peer_preshared_key,
 		       NOISE_SYMMETRIC_KEY_LEN);
@@ -83,7 +86,9 @@ bool wg_noise_handshake_init(struct noise_handshake *handshake,
 static void handshake_zero(struct noise_handshake *handshake)
 {
 	memset(&handshake->ephemeral_private, 0, NOISE_PUBLIC_KEY_LEN);
+	memset(&handshake->ephemeral_private_pq, 0, NOISE_PQ_PUBLIC_KEY_LEN);
 	memset(&handshake->remote_ephemeral, 0, NOISE_PUBLIC_KEY_LEN);
+	memset(&handshake->remote_ephemeral_pq, 0, NOISE_PQ_PUBLIC_KEY_LEN);
 	memset(&handshake->hash, 0, NOISE_HASH_LEN);
 	memset(&handshake->chaining_key, 0, NOISE_HASH_LEN);
 	handshake->remote_index = 0;
@@ -392,6 +397,45 @@ static void mix_hash(u8 hash[NOISE_HASH_LEN], const u8 *src, size_t src_len)
 	blake2s_final(&blake, hash);
 }
 
+static bool __must_check mix_pq_enc(u8 chaining_key[NOISE_HASH_LEN],
+		u8 hash[NOISE_HASH_LEN],
+		u8 pq_ciphertext[NOISE_PQ_CIPHERTEXT_LEN],
+		const u8 ephemeral_public[NOISE_PQ_PUBLIC_KEY_LEN])
+{
+	u8 shared_secret[NOISE_PQ_SS_LEN];
+
+	if (unlikely(!pqcrypto_kem_newhope512cca_enc(pq_ciphertext,
+					shared_secret, ephemeral_public)))
+		return false;
+	mix_hash(hash, pq_ciphertext, NOISE_PQ_CIPHERTEXT_LEN);
+	kdf(chaining_key, NULL, NULL, pq_ciphertext, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_CIPHERTEXT_LEN, chaining_key);
+	kdf(chaining_key, NULL, NULL, shared_secret, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_SS_LEN, chaining_key);
+	memzero_explicit(shared_secret, NOISE_PQ_SS_LEN);
+	return true;
+}
+
+static bool __must_check mix_pq_dec(u8 chaining_key[NOISE_HASH_LEN],
+		u8 hash[NOISE_HASH_LEN],
+		u8 pq_ciphertext[NOISE_PQ_CIPHERTEXT_LEN],
+		const u8 ephemeral_private[NOISE_PQ_SECRET_KEY_LEN])
+{
+	u8 shared_secret[NOISE_PQ_SS_LEN];
+
+	mix_hash(hash, pq_ciphertext, NOISE_PQ_CIPHERTEXT_LEN);
+	kdf(chaining_key, NULL, NULL, pq_ciphertext, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_CIPHERTEXT_LEN, chaining_key);
+
+	if (unlikely(!pqcrypto_kem_newhope512cca_dec(shared_secret,
+					pq_ciphertext, ephemeral_private)))
+		return false;
+	kdf(chaining_key, NULL, NULL, shared_secret, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_SS_LEN, chaining_key);
+	memzero_explicit(shared_secret, NOISE_PQ_SS_LEN);
+	return true;
+}
+
 static void mix_psk(u8 chaining_key[NOISE_HASH_LEN], u8 hash[NOISE_HASH_LEN],
 		    u8 key[NOISE_SYMMETRIC_KEY_LEN],
 		    const u8 psk[NOISE_SYMMETRIC_KEY_LEN])
@@ -406,11 +450,13 @@ static void mix_psk(u8 chaining_key[NOISE_HASH_LEN], u8 hash[NOISE_HASH_LEN],
 
 static void handshake_init(u8 chaining_key[NOISE_HASH_LEN],
 			   u8 hash[NOISE_HASH_LEN],
-			   const u8 remote_static[NOISE_PUBLIC_KEY_LEN])
+			   const u8 remote_static[NOISE_PUBLIC_KEY_LEN],
+			   const u8 remote_static_pq[NOISE_PQ_PUBLIC_KEY_LEN])
 {
 	memcpy(hash, handshake_init_hash, NOISE_HASH_LEN);
 	memcpy(chaining_key, handshake_init_chaining_key, NOISE_HASH_LEN);
 	mix_hash(hash, remote_static, NOISE_PUBLIC_KEY_LEN);
+	mix_hash(hash, remote_static_pq, NOISE_PQ_PUBLIC_KEY_LEN);
 }
 
 static void message_encrypt(u8 *dst_ciphertext, const u8 *src_plaintext,
@@ -445,6 +491,18 @@ static void message_ephemeral(u8 ephemeral_dst[NOISE_PUBLIC_KEY_LEN],
 	mix_hash(hash, ephemeral_src, NOISE_PUBLIC_KEY_LEN);
 	kdf(chaining_key, NULL, NULL, ephemeral_src, NOISE_HASH_LEN, 0, 0,
 	    NOISE_PUBLIC_KEY_LEN, chaining_key);
+}
+
+static void message_ephemeral_pq(u8 ephemeral_dst[NOISE_PQ_PUBLIC_KEY_LEN],
+		          const u8 ephemeral_src[NOISE_PQ_PUBLIC_KEY_LEN],
+				  u8 chaining_key[NOISE_HASH_LEN],
+				  u8 hash[NOISE_HASH_LEN])
+{
+	if (ephemeral_dst != ephemeral_src)
+		memcpy(ephemeral_dst, ephemeral_src, NOISE_PQ_PUBLIC_KEY_LEN);
+	mix_hash(hash, ephemeral_src, NOISE_PQ_PUBLIC_KEY_LEN);
+	kdf(chaining_key, NULL, NULL, ephemeral_src, NOISE_HASH_LEN, 0, 0,
+	    NOISE_PQ_PUBLIC_KEY_LEN, chaining_key);
 }
 
 static void tai64n_now(u8 output[NOISE_TIMESTAMP_LEN])
@@ -488,7 +546,7 @@ wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 	dst->header.type = cpu_to_le32(MESSAGE_HANDSHAKE_INITIATION);
 
 	handshake_init(handshake->chaining_key, handshake->hash,
-		       handshake->remote_static);
+	               handshake->remote_static, handshake->remote_static_pq);
 
 	/* e */
 	curve25519_generate_secret(handshake->ephemeral_private);
@@ -499,6 +557,19 @@ wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 			  dst->unencrypted_ephemeral, handshake->chaining_key,
 			  handshake->hash);
 
+	/* encaps(sq) */
+	if (!mix_pq_enc(handshake->chaining_key, handshake->hash,
+					dst->pq_ciphertext_static, handshake->remote_static_pq))
+		goto out;
+
+	/* eq */
+	if (pqcrypto_kem_newhope512cca_keypair(dst->unencrypted_ephemeral_pq,
+				handshake->ephemeral_private_pq))
+		goto out;
+	message_ephemeral_pq(dst->unencrypted_ephemeral_pq,
+			dst->unencrypted_ephemeral_pq, handshake->chaining_key,
+			handshake->hash);
+
 	/* es */
 	if (!mix_dh(handshake->chaining_key, key, handshake->ephemeral_private,
 		    handshake->remote_static))
@@ -508,6 +579,11 @@ wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 	message_encrypt(dst->encrypted_static,
 			handshake->static_identity->static_public,
 			NOISE_PUBLIC_KEY_LEN, key, handshake->hash);
+
+	/* sq */
+	message_encrypt(dst->encrypted_static_pq,
+			handshake->static_identity->static_pq_public,
+			NOISE_PQ_PUBLIC_KEY_LEN, key, handshake->hash);
 
 	/* ss */
 	kdf(handshake->chaining_key, key, NULL,
@@ -545,17 +621,28 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	u8 chaining_key[NOISE_HASH_LEN];
 	u8 hash[NOISE_HASH_LEN];
 	u8 s[NOISE_PUBLIC_KEY_LEN];
+	u8 sq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 e[NOISE_PUBLIC_KEY_LEN];
+	u8 eq[NOISE_PQ_PUBLIC_KEY_LEN];  // TODO: maybe remove (b/c unnecessary)
 	u8 t[NOISE_TIMESTAMP_LEN];
 
 	down_read(&wg->static_identity.lock);
 	if (unlikely(!wg->static_identity.has_identity))
 		goto out;
 
-	handshake_init(chaining_key, hash, wg->static_identity.static_public);
+	handshake_init(chaining_key, hash, wg->static_identity.static_public,
+	               wg->static_identity.static_pq_public);
 
 	/* e */
 	message_ephemeral(e, src->unencrypted_ephemeral, chaining_key, hash);
+
+	/* encaps(sq) */
+	if (!mix_pq_dec(chaining_key, hash, src->pq_ciphertext_static,
+			     wg->static_identity.static_pq_private))
+		goto out;
+
+	/* eq */
+	message_ephemeral_pq(eq, src->unencrypted_ephemeral_pq, chaining_key, hash);
 
 	/* es */
 	if (!mix_dh(chaining_key, key, wg->static_identity.static_private, e))
@@ -566,7 +653,13 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 			     sizeof(src->encrypted_static), key, hash))
 		goto out;
 
+	/* sq */
+	if (!message_decrypt(sq, src->encrypted_static_pq,
+			     sizeof(src->encrypted_static_pq), key, hash))
+		goto out;
+
 	/* Lookup which peer we're actually talking to */
+	// TODO: adapt for PQ (check sq for match)
 	peer = wg_pubkey_hashtable_lookup(wg->peer_hashtable, s);
 	if (!peer)
 		goto out;
@@ -595,6 +688,7 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	/* Success! Copy everything to peer */
 	down_write(&handshake->lock);
 	memcpy(handshake->remote_ephemeral, e, NOISE_PUBLIC_KEY_LEN);
+	memcpy(handshake->remote_ephemeral_pq, eq, NOISE_PUBLIC_KEY_LEN);
 	memcpy(handshake->latest_timestamp, t, NOISE_TIMESTAMP_LEN);
 	memcpy(handshake->hash, hash, NOISE_HASH_LEN);
 	memcpy(handshake->chaining_key, chaining_key, NOISE_HASH_LEN);
@@ -642,6 +736,16 @@ bool wg_noise_handshake_create_response(struct message_handshake_response *dst,
 	message_ephemeral(dst->unencrypted_ephemeral,
 			  dst->unencrypted_ephemeral, handshake->chaining_key,
 			  handshake->hash);
+
+	/* encaps(eq) */
+	if (!mix_pq_enc(handshake->chaining_key, handshake->hash,
+					dst->pq_ciphertext_ephemeral, handshake->remote_ephemeral_pq))
+		goto out;
+
+	/* encaps(sq) */
+	if (!mix_pq_enc(handshake->chaining_key, handshake->hash,
+					dst->pq_ciphertext_static, handshake->remote_static_pq))
+		goto out;
 
 	/* ee */
 	if (!mix_dh(handshake->chaining_key, NULL, handshake->ephemeral_private,

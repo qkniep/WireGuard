@@ -404,7 +404,7 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 		up_read(&wg->static_identity.lock);
 
 		ret = -ENOMEM;
-		peer = wg_peer_create(wg, public_key, preshared_key);
+		peer = wg_peer_create(wg, public_key, preshared_key);  // TODO: PQ
 		if (!peer)
 			goto out;
 		/* Take additional reference, as though we've just been

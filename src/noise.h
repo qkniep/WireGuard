@@ -52,6 +52,8 @@ struct noise_keypairs {
 struct noise_static_identity {
 	u8 static_public[NOISE_PUBLIC_KEY_LEN];
 	u8 static_private[NOISE_PUBLIC_KEY_LEN];
+	u8 static_pq_public[NOISE_PQ_PUBLIC_KEY_LEN];
+	u8 static_pq_private[NOISE_PQ_PUBLIC_KEY_LEN];
 	struct rw_semaphore lock;
 	bool has_identity;
 };
@@ -73,8 +75,11 @@ struct noise_handshake {
 	struct noise_static_identity *static_identity;
 
 	u8 ephemeral_private[NOISE_PUBLIC_KEY_LEN];
+	u8 ephemeral_private_pq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 remote_static[NOISE_PUBLIC_KEY_LEN];
+	u8 remote_static_pq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 remote_ephemeral[NOISE_PUBLIC_KEY_LEN];
+	u8 remote_ephemeral_pq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 precomputed_static_static[NOISE_PUBLIC_KEY_LEN];
 
 	u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN];
@@ -97,6 +102,7 @@ void wg_noise_init(void);
 bool wg_noise_handshake_init(struct noise_handshake *handshake,
 			   struct noise_static_identity *static_identity,
 			   const u8 peer_public_key[NOISE_PUBLIC_KEY_LEN],
+			   const u8 peer_pq_public_key[NOISE_PQ_PUBLIC_KEY_LEN],
 			   const u8 peer_preshared_key[NOISE_SYMMETRIC_KEY_LEN],
 			   struct wg_peer *peer);
 void wg_noise_handshake_clear(struct noise_handshake *handshake);
