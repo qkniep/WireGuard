@@ -9,17 +9,17 @@
 #include <zinc/curve25519.h>
 #include <zinc/chacha20poly1305.h>
 #include <zinc/blake2s.h>
-#include <pqcrypto/pqcrypto_kem_newhope512cca.h>
+#include <pqcrypto/pqcrypto_kem_kyber512.h>
 
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/skbuff.h>
 
 enum noise_lengths {
-	NOISE_PQ_PUBLIC_KEY_LEN = pqcrypto_kem_newhope512cca_PUBLICKEYBYTES,
-	NOISE_PQ_SECRET_KEY_LEN = pqcrypto_kem_newhope512cca_SECRETKEYBYTES,
-	NOISE_PQ_CIPHERTEXT_LEN = pqcrypto_kem_newhope512cca_CIPHERTEXTBYTES,
-	NOISE_PQ_SS_LEN = pqcrypto_kem_newhope512cca_SECRETKEYBYTES,
+	NOISE_PQ_PUBLIC_KEY_LEN = pqcrypto_kem_kyber512_PUBLICKEYBYTES,
+	NOISE_PQ_SECRET_KEY_LEN = pqcrypto_kem_kyber512_SECRETKEYBYTES,
+	NOISE_PQ_CIPHERTEXT_LEN = pqcrypto_kem_kyber512_CIPHERTEXTBYTES,
+	NOISE_PQ_SS_LEN = pqcrypto_kem_kyber512_SECRETKEYBYTES,
 	NOISE_PUBLIC_KEY_LEN = CURVE25519_KEY_SIZE,
 	NOISE_SYMMETRIC_KEY_LEN = CHACHA20POLY1305_KEY_SIZE,
 	NOISE_TIMESTAMP_LEN = sizeof(u64) + sizeof(u32),
@@ -89,7 +89,6 @@ struct message_handshake_initiation {
 	u8 unencrypted_ephemeral_pq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 pq_ciphertext_static[NOISE_PQ_CIPHERTEXT_LEN];
 	u8 encrypted_static[noise_encrypted_len(NOISE_PUBLIC_KEY_LEN)];
-	u8 encrypted_static_pq[noise_encrypted_len(NOISE_PQ_PUBLIC_KEY_LEN)];
 	u8 encrypted_timestamp[noise_encrypted_len(NOISE_TIMESTAMP_LEN)];
 	struct message_macs macs;
 };
@@ -100,7 +99,6 @@ struct message_handshake_response {
 	__le32 receiver_index;
 	u8 unencrypted_ephemeral[NOISE_PUBLIC_KEY_LEN];
 	u8 pq_ciphertext_ephemeral[NOISE_PQ_CIPHERTEXT_LEN];
-	u8 pq_ciphertext_static[NOISE_PQ_CIPHERTEXT_LEN];
 	u8 encrypted_nothing[noise_encrypted_len(0)];
 	struct message_macs macs;
 };

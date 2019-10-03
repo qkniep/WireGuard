@@ -88,7 +88,7 @@ static void handshake_zero(struct noise_handshake *handshake)
 	memset(&handshake->ephemeral_private, 0, NOISE_PUBLIC_KEY_LEN);
 	memset(&handshake->ephemeral_private_pq, 0, NOISE_PQ_PUBLIC_KEY_LEN);
 	memset(&handshake->remote_ephemeral, 0, NOISE_PUBLIC_KEY_LEN);
-	memset(&handshake->remote_ephemeral_pq, 0, NOISE_PQ_PUBLIC_KEY_LEN);
+	memset(&handshake->remote_ephemeral_pq, 0, NOISE_PUBLIC_KEY_LEN);
 	memset(&handshake->hash, 0, NOISE_HASH_LEN);
 	memset(&handshake->chaining_key, 0, NOISE_HASH_LEN);
 	handshake->remote_index = 0;
@@ -423,7 +423,7 @@ static bool __must_check mix_pq_enc(u8 chaining_key[NOISE_HASH_LEN],
 {
 	u8 shared_secret[NOISE_PQ_SS_LEN];
 
-	if (unlikely(!pqcrypto_kem_newhope512cca_enc(pq_ciphertext,
+	if (unlikely(!pqcrypto_kem_kyber512_enc(pq_ciphertext,
 					shared_secret, ephemeral_public)))
 		return false;
 	mix_hash(hash, pq_ciphertext, NOISE_PQ_CIPHERTEXT_LEN);
@@ -446,7 +446,7 @@ static bool __must_check mix_pq_dec(u8 chaining_key[NOISE_HASH_LEN],
 	kdf(chaining_key, NULL, NULL, pq_ciphertext, NOISE_HASH_LEN, 0, 0,
 	    NOISE_PQ_CIPHERTEXT_LEN, chaining_key);
 
-	if (unlikely(!pqcrypto_kem_newhope512cca_dec(shared_secret,
+	if (unlikely(!pqcrypto_kem_kyber512_dec(shared_secret,
 					pq_ciphertext, ephemeral_private)))
 		return false;
 	kdf(chaining_key, NULL, NULL, shared_secret, NOISE_HASH_LEN, 0, 0,
@@ -582,7 +582,7 @@ wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 		goto out;
 
 	/* eq */
-	if (pqcrypto_kem_newhope512cca_keypair(dst->unencrypted_ephemeral_pq,
+	if (pqcrypto_kem_kyber512_keypair(dst->unencrypted_ephemeral_pq,
 				handshake->ephemeral_private_pq))
 		goto out;
 	message_ephemeral_pq(dst->unencrypted_ephemeral_pq,
@@ -598,11 +598,6 @@ wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 	message_encrypt(dst->encrypted_static,
 			handshake->static_identity->static_public,
 			NOISE_PUBLIC_KEY_LEN, key, handshake->hash);
-
-	/* sq */
-	message_encrypt(dst->encrypted_static_pq,
-			handshake->static_identity->static_pq_public,
-			NOISE_PQ_PUBLIC_KEY_LEN, key, handshake->hash);
 
 	/* ss */
 	kdf(handshake->chaining_key, key, NULL,
@@ -640,7 +635,6 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	u8 chaining_key[NOISE_HASH_LEN];
 	u8 hash[NOISE_HASH_LEN];
 	u8 s[NOISE_PUBLIC_KEY_LEN];
-	u8 sq[NOISE_PQ_PUBLIC_KEY_LEN];
 	u8 e[NOISE_PUBLIC_KEY_LEN];
 	u8 eq[NOISE_PQ_PUBLIC_KEY_LEN];  // TODO: maybe remove (b/c unnecessary)
 	u8 t[NOISE_TIMESTAMP_LEN];
@@ -670,11 +664,6 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	/* s */
 	if (!message_decrypt(s, src->encrypted_static,
 			     sizeof(src->encrypted_static), key, hash))
-		goto out;
-
-	/* sq */
-	if (!message_decrypt(sq, src->encrypted_static_pq,
-			     sizeof(src->encrypted_static_pq), key, hash))
 		goto out;
 
 	/* Lookup which peer we're actually talking to */
@@ -759,11 +748,6 @@ bool wg_noise_handshake_create_response(struct message_handshake_response *dst,
 	/* encaps(eq) */
 	if (!mix_pq_enc(handshake->chaining_key, handshake->hash,
 					dst->pq_ciphertext_ephemeral, handshake->remote_ephemeral_pq))
-		goto out;
-
-	/* encaps(sq) */
-	if (!mix_pq_enc(handshake->chaining_key, handshake->hash,
-					dst->pq_ciphertext_static, handshake->remote_static_pq))
 		goto out;
 
 	/* ee */
